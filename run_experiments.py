@@ -7,7 +7,7 @@ Usage:  python3 run_experiments.py [outdir]
 from __future__ import annotations
 import json, sys, time, os
 import numpy as np
-from scipy.stats import ranksums, pearsonr, spearmanr
+from scipy.stats import wilcoxon, pearsonr, spearmanr
 
 import core
 from core import (Oracle, TARGETS, STATICS, kmax, cr_ub, run_lattice,
@@ -69,6 +69,7 @@ def run_regime(name, res=None, only=None, save_cb=None):
                       "kappa": float(n_components(np.vstack([STATICS, gre.mob]), rc)),
                       "cr_all": [gre.cr]}
      res["_greedy_mob"] = gre.mob.tolist()
+     res["Greedy"]["gain_evals"] = int(gre.gain_evals)
      # greedy resolution study
      res["_greedy_res"] = {}
      for gs in (20, 60, 100):
@@ -137,21 +138,27 @@ def wilcoxon_table(reg):
         a = np.array(reg[R][m1]["cr_all"], float)
         b = np.array(reg[R][m2]["cr_all"], float)
         dcr = b.mean() - a.mean()
+        # Paired design: identical initial populations per replicate, so the
+        # Wilcoxon signed-rank test on the within-replicate differences is the
+        # matching test. All-zero differences (saturated instance) -> p = 1.
         if np.allclose(a, b):
             p = 1.0
         else:
-            p = float(ranksums(a, b).pvalue)
+            p = float(wilcoxon(a, b, zero_method="zsplit").pvalue)
         # A12 of m2 over m1
         gt = (b[:, None] > a[None, :]).mean()
         eq = (b[:, None] == a[None, :]).mean()
         a12 = float(gt + 0.5 * eq)
-        # bootstrap CI on mean difference
+        # paired bootstrap CI on the mean within-replicate difference
         n = len(a)
         idx = rng.integers(0, n, size=(10000, n))
-        diffs = b[idx].mean(axis=1) - a[idx].mean(axis=1)
+        d_pair = b - a
+        diffs = d_pair[idx].mean(axis=1)
         ci = [float(np.percentile(diffs, 2.5)), float(np.percentile(diffs, 97.5))]
+        # paired win rate: fraction of replicates on which m2 beats m1
+        win = float((b > a).mean() + 0.5 * (b == a).mean())
         rows.append({"regime": R, "m1": m1, "m2": m2, "dcr": float(dcr),
-                     "p_raw": p, "a12": a12, "ci": ci})
+                     "p_raw": p, "a12": a12, "win": win, "ci": ci})
     # Holm adjustment over the family
     ps = np.array([r["p_raw"] for r in rows])
     order = np.argsort(ps)

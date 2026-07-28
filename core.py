@@ -19,6 +19,7 @@ Oracle accounting (matches Sec. "budget accounting" of the paper):
 from __future__ import annotations
 import time
 import numpy as np
+from scipy.optimize import linear_sum_assignment
 
 
 # ---------------------------------------------------------------- instance ---
@@ -96,7 +97,16 @@ def clip_field(x: np.ndarray) -> np.ndarray:
     return np.clip(x, 0.0, FIELD)
 
 def displacement(final: np.ndarray, init: np.ndarray) -> float:
-    return float(np.linalg.norm(final - init, axis=1).sum())
+    """Minimum total travel to realise `final` starting from `init`.
+
+    Mobile sensors are interchangeable, so the deployment cost is the optimal
+    assignment between the two point sets, not an index-wise difference: the
+    evolutionary operators do not preserve node identity, which makes the
+    index-wise sum an arbitrary over-estimate.
+    """
+    C = np.linalg.norm(final[:, None, :] - init[None, :, :], axis=2)
+    r, c = linear_sum_assignment(C)
+    return float(C[r, c].sum())
 
 def n_components(layout_all: np.ndarray, rc: float) -> int:
     n = layout_all.shape[0]
@@ -179,9 +189,16 @@ def run_greedy(orc: Oracle, n_mobile: int, grid_side: int = 60) -> Result:
         covered |= masks[j]
     mob = cand[chosen]
     orc.calls = 0
-    cr = orc.f(mob)                      # 1 final oracle call
-    orc.calls = n_mobile + 1             # paper convention: one call per placement + final
-    return Result(cr=cr, mob=mob, oracle=orc.calls, ct=time.perf_counter() - t0,
+    cr = orc.f(mob)                      # 1 full-layout oracle call
+    # Two distinct costs, both reported. `oracle` counts full-layout coverage
+    # evaluations, the unit used for every other method (one per placement plus
+    # the final verification). `gain_evals` counts the marginal-gain lookups on
+    # the precomputed candidate-target incidence matrix, which are individually
+    # far cheaper than an oracle call but are NOT free: there are |C| of them at
+    # each of the n_mobile placements.
+    return Result(cr=cr, mob=mob, oracle=n_mobile + 1,
+                  gain_evals=cand.shape[0] * n_mobile,
+                  ct=time.perf_counter() - t0,
                   disp=0.0, hist=np.array([cr]))
 
 
@@ -307,7 +324,17 @@ def phi_raw(mobs: np.ndarray) -> np.ndarray:
 
 
 def phi_inv(orc: Oracle, mobs: np.ndarray, k: int = 4) -> np.ndarray:
-    """Permutation-invariant descriptors (see Sec. method:surrogate)."""
+    """Permutation-invariant descriptors (see Sec. method:surrogate).
+
+    IMPORTANT: these features are derived from the uncovered-target set, whose
+    computation IS the coverage oracle. The calls are deliberately not counted,
+    which makes GA-LR-S(inv) an optimistic upper bound rather than a
+    budget-parity competitor: it is handed oracle information for free. The
+    paper reports it as such. A descriptor that costs an oracle call cannot, by
+    construction, save oracle calls; the variant exists to test whether a
+    near-perfect ranker would help even if it were free, not to propose a
+    practical method.
+    """
     P, Nm, _ = mobs.shape
     feats = np.zeros((P, k * k + 5))
     edges = np.linspace(0.0, FIELD, k + 1)
